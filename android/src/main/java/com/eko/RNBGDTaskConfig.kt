@@ -7,6 +7,7 @@ class RNBGDTaskConfig(
   var id: String?,
   var url: String?,
   var destination: String?,
+  var tempFilePath: String?,
   metadata: String?,
   notificationTitle: String?
 ) : Serializable {

@@ -81,4 +81,6 @@ dependencies {
   implementation 'com.tencent:mmkv-shared:2.2.0'
 
   implementation 'com.google.code.gson:gson:2.12.1'
+
+  implementation 'com.github.tonyofrancis.Fetch:fetch2:3.4.1'
 }

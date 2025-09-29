@@ -1,64 +1,56 @@
 package com.eko
 
 import android.app.DownloadManager
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
-import android.media.MediaScannerConnection
-import android.media.MediaScannerConnection.OnScanCompletedListener
-import android.net.Uri
-import android.os.Build
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import android.webkit.MimeTypeMap
-import com.eko.handlers.OnBegin
-import com.eko.handlers.OnBeginState
-import com.eko.handlers.OnProgress
-import com.eko.handlers.OnProgressState
+import androidx.core.content.edit
 import com.eko.utils.FileUtils
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
+import com.facebook.react.bridge.WritableArray
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.tencent.mmkv.MMKV
+import com.tonyodev.fetch2.AbstractFetchListener
+import com.tonyodev.fetch2.Download
+import com.tonyodev.fetch2.Fetch
+import com.tonyodev.fetch2.Request
+import com.tonyodev.fetch2.Status
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
-import androidx.core.content.edit
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 
 class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
-  ReactContextBaseJavaModule(reactContext) {
-  private val cachedExecutorPool: ExecutorService = Executors.newCachedThreadPool()
+  ReactContextBaseJavaModule(reactContext), LifecycleEventListener {
   private val fixedExecutorPool: ExecutorService = Executors.newFixedThreadPool(1)
   private val downloader: Downloader
-  private var downloadReceiver: BroadcastReceiver? = null
-  private var downloadIdToConfig: MutableMap<Long?, RNBGDTaskConfig?> =
-    HashMap<Long?, RNBGDTaskConfig?>()
+  private var downloadIdToConfig: MutableMap<Long, RNBGDTaskConfig?> =
+    HashMap<Long, RNBGDTaskConfig?>()
   private val configIdToDownloadId: MutableMap<String?, Long?> = HashMap<String?, Long?>()
-  private val configIdToPercent: MutableMap<String?, Double?> = HashMap<String?, Double?>()
-  private val configIdToLastBytes: MutableMap<String?, Long?> = HashMap<String?, Long?>()
-  private val configIdToProgressFuture: MutableMap<String?, Future<OnProgressState?>?> =
-    HashMap<String?, Future<OnProgressState?>?>()
-  private val progressReports: MutableMap<String?, WritableMap?> = HashMap<String?, WritableMap?>()
   private var progressInterval = 0
   private var progressMinBytes = (1024 * 1024 // Default 1MB
     ).toLong()
-  private var lastProgressReportedAt = Date()
   private var ee: DeviceEventManagerModule.RCTDeviceEventEmitter? = null
+
+  private var networkChangeReceiver: NetworkChangeReceiver? = null
 
   init {
     // Initialize SharedPreferences as fallback
@@ -100,10 +92,141 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
     loadConfigMap()
 
     downloader = Downloader(reactContext)
+
+    reactContext.addLifecycleEventListener(this);
   }
 
   override fun getName(): String {
     return NAME
+  }
+
+  // LifecycleEventListener methods
+  override fun onHostResume() {
+    val fetch = Fetch.Impl.getDefaultInstance()
+    fetch.addListener(fetchListener)
+
+    if (networkChangeReceiver == null) {
+      networkChangeReceiver = NetworkChangeReceiver(this)
+      val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION)
+      reactApplicationContext.registerReceiver(networkChangeReceiver, filter)
+      Log.d(name, "NetworkChangeReceiver re-registered in onHostResume")
+    }
+
+    fetch.getDownloads { downloads ->
+      val list = downloads.toMutableList()
+      list.sortBy { it.created }
+      for (download in list) {
+        val config = downloadIdToConfig[download.id.toLong()]
+        if (config == null) {
+          Log.d(name, "No config found for download ID: ${download.id}, canceling.")
+          fetch.remove(download.id)
+          continue
+        }
+        when (download.status) {
+          Status.DOWNLOADING -> fetch.resume(download.id)
+          Status.QUEUED -> {
+            fetch.pause(download.id)
+            fetch.resume(download.id)
+          }
+          Status.COMPLETED -> {
+            val params: WritableMap = Arguments.createMap()
+            params.putString("id", config.id)
+            params.putString("location", download.file)
+            params.putDouble("bytesDownloaded", download.downloaded.toDouble())
+            params.putDouble("bytesTotal", download.total.toDouble())
+            ee?.emit("downloadComplete", params)
+          }
+          else -> { /* no-op */ }
+        }
+      }
+    }
+  }
+
+  override fun onHostPause() {
+    Fetch.Impl.getDefaultInstance().removeListener(fetchListener)
+  }
+
+  override fun onHostDestroy() {
+    Fetch.Impl.getDefaultInstance().close()
+
+    networkChangeReceiver?.let {
+      try {
+        reactApplicationContext.unregisterReceiver(it)
+        Log.d(name, "NetworkChangeReceiver unregistered")
+      } catch (e: IllegalArgumentException) {
+        Log.w(name, "Receiver already unregistered or not registered: ${e.message}")
+      }
+      networkChangeReceiver = null
+    }
+  }
+
+  private val fetchListener = object : AbstractFetchListener() {
+    override fun onAdded(download: Download) {
+      val configId = getConfigIdFromDownload(download)
+
+      val params = Arguments.createMap().apply {
+        putString("id", configId)
+        putLong("expectedBytes", download.total)
+      }
+      ee?.emit("downloadBegin", params)
+    }
+
+    override fun onQueued(download: Download, waitingOnNetwork: Boolean) {
+      Log.d(name, "Download queued: ${download.id}")
+    }
+
+    override fun onCompleted(download: Download) {
+      try {
+        Log.d(name, "Download completed:${download.id}")
+        val config = downloadIdToConfig[download.id.toLong()]
+
+        val future = setFileChangesBeforeCompletion(config!!.tempFilePath!!, config.destination!!)
+        future.get()
+
+        val params = Arguments.createMap().apply {
+          putString("id", config.id)
+          putString("location", download.file)
+          putLong("bytesDownloaded", download.downloaded)
+          putLong("bytesTotal", download.total)
+        }
+        ee?.emit("downloadComplete", params)
+      } catch (e: Exception) {
+        onDownloadFailed(download)
+        downloader.cancel(download.id.toLong())
+      }
+    }
+
+    override fun onProgress(download: Download, etaInMilliseconds: Long, downloadedBytesPerSecond: Long) {
+      onDownloadProgress(download)
+    }
+
+    override fun onPaused(download: Download) {
+      // TODO
+    }
+
+    override fun onResumed(download: Download) {
+      onDownloadProgress(download)
+    }
+
+    override fun onCancelled(download: Download) {
+      val configId = getConfigIdFromDownload(download)
+
+      val params = Arguments.createMap().apply {
+        putString("id", configId)
+        putLong("bytesDownloaded", download.downloaded)
+        putLong("bytesTotal", download.total)
+      }
+
+      ee?.emit("downloadCancelled", params)
+    }
+
+    override fun onRemoved(download: Download) {
+      // TODO
+    }
+
+    override fun onDeleted(download: Download) {
+      // TODO
+    }
   }
 
   override fun getConstants(): MutableMap<String?, Any?> {
@@ -135,147 +258,46 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
     ee = getReactApplicationContext().getJSModule<DeviceEventManagerModule.RCTDeviceEventEmitter?>(
       DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
     )
-    registerDownloadReceiver()
 
-    for (entry in downloadIdToConfig.entries.filter { it.value != null }) {
-      val downloadId = entry.key
-      val config: RNBGDTaskConfig = entry.value!!
-      resumeTasks(downloadId, config)
-    }
+    val filter = IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION);
+    networkChangeReceiver = NetworkChangeReceiver(this);
+    getReactApplicationContext().registerReceiver(networkChangeReceiver, filter);
   }
 
   override fun invalidate() {
-    unregisterDownloadReceiver()
+
   }
 
-  private fun registerDownloadReceiver() {
-    val context: Context = getReactApplicationContext()
-    val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+  private fun getConfigIdFromDownload(download: Download): String? {
+    val config = downloadIdToConfig[download.id.toLong()]
+    Log.d(name, "getConfigIdFromDownload: ${download.identifier}, $config")
+    return config?.id
+  }
 
-    downloadReceiver = object : BroadcastReceiver() {
-      override fun onReceive(context: Context?, intent: Intent) {
-        val downloadId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1)
-        val config: RNBGDTaskConfig? = downloadIdToConfig.get(downloadId)
+  private fun onDownloadFailed(download: Download) {
+    val params = Arguments.createMap().apply {
+      putString("id", download.id.toString())
+      // TODO: can we support error code? Does it make sense?
+      putInt("errorCode", -1)
+      putString("error", download.error.toString())
+    }
+    ee?.emit("downloadFailed", params)
+  }
 
-        if (config != null) {
-          val downloadStatus: WritableMap = downloader.checkDownloadStatus(downloadId)
-          val status = downloadStatus.getInt("status")
-          val localUri = downloadStatus.getString("localUri")
+  private fun onDownloadProgress(download: Download) {
+    val configId = getConfigIdFromDownload(download)
 
-          stopTaskProgress(config.id)
-
-          synchronized(sharedLock) {
-            when (status) {
-              DownloadManager.STATUS_SUCCESSFUL -> {
-                onSuccessfulDownload(config, downloadStatus)
-              }
-
-              DownloadManager.STATUS_FAILED -> {
-                onFailedDownload(config, downloadStatus)
-              }
-            }
-            if (localUri != null) {
-              // Prevent memory leaks from MediaScanner.
-              // Download successful, clean task after media scanning.
-              val paths: Array<String> = arrayOf(localUri)
-              MediaScannerConnection.scanFile(
-                context,
-                paths,
-                null,
-                OnScanCompletedListener { path: String?, uri: Uri? -> stopTask(config.id) })
-            } else {
-              // Download failed, clean task.
-              stopTask(config.id)
-            }
-          }
-        }
-      }
+    val params = Arguments.createMap().apply {
+      putString("id", configId)
+      putDouble("bytesDownloaded", download.downloaded.toDouble())
+      putDouble("bytesTotal", download.total.toDouble())
     }
 
-    compatRegisterReceiver(context, downloadReceiver, filter, true)
-  }
-
-  // TAKEN FROM
-  // https://github.com/facebook/react-native/pull/38256/files#diff-d5e21477eeadeb0c536d5870f487a8528f9a16ae928c397fec7b255805cc8ad3
-  private fun compatRegisterReceiver(
-    context: Context, receiver: BroadcastReceiver?, filter: IntentFilter?,
-    exported: Boolean
-  ) {
-    if (Build.VERSION.SDK_INT >= 34 && context.getApplicationInfo().targetSdkVersion >= 34) {
-      context.registerReceiver(
-        receiver, filter, if (exported) Context.RECEIVER_EXPORTED else Context.RECEIVER_NOT_EXPORTED
-      )
-    } else {
-      context.registerReceiver(receiver, filter)
+    val reportsArray = Arguments.createArray().apply {
+      pushMap(params.copy())
     }
-  }
 
-  private fun unregisterDownloadReceiver() {
-    if (downloadReceiver != null) {
-      getReactApplicationContext().unregisterReceiver(downloadReceiver)
-      downloadReceiver = null
-    }
-  }
-
-  private fun resumeTasks(downloadId: Long?, config: RNBGDTaskConfig) {
-    Thread(Runnable {
-      try {
-        val bytesDownloaded: Long = 0
-        var bytesTotal: Long = 0
-
-        if (!config.reportedBegin) {
-          val onBeginCallable: OnBegin = OnBegin(
-            config,
-            { configId: String?, headers: WritableMap?, expectedBytes: Long ->
-              this.onBeginDownload(
-                configId,
-                headers,
-                expectedBytes
-              )
-            })
-          val onBeginFuture: Future<OnBeginState> =
-            cachedExecutorPool.submit<OnBeginState?>(onBeginCallable)
-          val onBeginState: OnBeginState = onBeginFuture.get()
-          bytesTotal = onBeginState.expectedBytes
-
-          config.reportedBegin = true
-          downloadIdToConfig.put(downloadId, config)
-          saveDownloadIdToConfigMap()
-        }
-
-        val onProgressCallable: OnProgress = OnProgress(
-          config,
-          downloader,
-          downloadId!!,
-          bytesDownloaded,
-          bytesTotal,
-          { configId: String?, bytesDownloaded: Long, bytesTotal: Long ->
-            this.onProgressDownload(
-              configId,
-              bytesDownloaded,
-              bytesTotal
-            )
-          })
-        val onProgressFuture: Future<OnProgressState?> =
-          cachedExecutorPool.submit<OnProgressState?>(onProgressCallable)
-        configIdToProgressFuture.put(config.id, onProgressFuture)
-      } catch (e: Exception) {
-        Log.e(getName(), "resumeTasks: " + Log.getStackTraceString(e))
-      }
-    }).start()
-  }
-
-  private fun removeTaskFromMap(downloadId: Long) {
-    synchronized(sharedLock) {
-      val config: RNBGDTaskConfig? = downloadIdToConfig.get(downloadId)
-      if (config != null) {
-        configIdToDownloadId.remove(config.id)
-        configIdToPercent.remove(config.id)
-        configIdToLastBytes.remove(config.id)
-        downloadIdToConfig.remove(downloadId)
-        saveDownloadIdToConfigMap()
-      }
-    }
+    ee?.emit("downloadProgress", reportsArray)
   }
 
   /**
@@ -425,51 +447,48 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
       Log.d(getName(), "Final resolved URL: " + url)
     }
 
-    val request = DownloadManager.Request(Uri.parse(url))
-    request.setAllowedOverRoaming(isAllowedOverRoaming)
-    request.setAllowedOverMetered(isAllowedOverMetered)
-    request.setNotificationVisibility(if (isNotificationVisible) DownloadManager.Request.VISIBILITY_VISIBLE else DownloadManager.Request.VISIBILITY_HIDDEN)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-      request.setRequiresCharging(false)
-    }
+    val uuid = (System.currentTimeMillis() and 0xfffffffL).toInt()
+    val extension = MimeTypeMap.getFileExtensionFromUrl(destination)
+    val filename = "$uuid.$extension"
 
-    if (notificationTitle != null) {
-      request.setTitle(notificationTitle)
-    }
+    val tempFile = File(reactApplicationContext.cacheDir, filename)
+    val tempFilePath = tempFile.absolutePath
+
+    val request = Request(url!!, tempFilePath)
 
     // Add default headers to improve connection handling for slow-responding URLs
     // These headers encourage longer connections and help prevent premature
     // timeouts
-    request.addRequestHeader("Connection", "keep-alive")
-    request.addRequestHeader("Keep-Alive", "timeout=600, max=1000")
+    request.addHeader("Connection", "keep-alive")
+    request.addHeader("Keep-Alive", "timeout=600, max=1000")
 
     // Add a proper User-Agent to improve server compatibility
     if (!hasUserAgentHeader(headers)) {
-      request.addRequestHeader("User-Agent", "ReactNative-BackgroundDownloader/3.2.6")
+      request.addHeader("User-Agent", "ReactNative-BackgroundDownloader/3.2.6")
     }
 
     if (headers != null) {
       val iterator = headers.keySetIterator()
       while (iterator.hasNextKey()) {
         val headerKey = iterator.nextKey()
-        request.addRequestHeader(headerKey, headers.getString(headerKey))
+          headers.getString(headerKey)?.let { request.addHeader(headerKey, it) }
       }
     }
 
-    val uuid = (System.currentTimeMillis() and 0xfffffffL).toInt()
-    val extension = MimeTypeMap.getFileExtensionFromUrl(destination)
-    val filename = uuid.toString() + "." + extension
-    request.setDestinationInExternalFilesDir(this.getReactApplicationContext(), null, filename)
+    Log.d(
+        name,
+      "will download with requestId: " + request.id + ", id: " + id + ", url: " + url + ", file: " + tempFilePath
+    )
+    val requestId = request.id
 
-    val downloadId: Long = downloader.download(request)
-    val config: RNBGDTaskConfig = RNBGDTaskConfig(id, url, destination, metadata, notificationTitle)
+    downloader.download(request)
+    val config = RNBGDTaskConfig(id, url, destination, tempFilePath, null, null)
 
     synchronized(sharedLock) {
-      configIdToDownloadId.put(id, downloadId)
-      configIdToPercent.put(id, 0.0)
-      downloadIdToConfig.put(downloadId, config)
-      saveDownloadIdToConfigMap()
-      resumeTasks(downloadId, config)
+      Log.d(name, "will map configId: $id to downloadId: $requestId");
+      configIdToDownloadId.put(id, requestId.toLong());
+      downloadIdToConfig.put(requestId.toLong(), config);
+      saveDownloadIdToConfigMap();
     }
   }
 
@@ -480,11 +499,11 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
   @Suppress("unused")
   fun pauseTask(configId: String?) {
     synchronized(sharedLock) {
-      val downloadId = configIdToDownloadId.get(configId)
+      val downloadId: Long? = configIdToDownloadId[configId]
       if (downloadId != null) {
         try {
           downloader.pause(downloadId)
-        } catch (e: UnsupportedOperationException) {
+        } catch (e: java.lang.UnsupportedOperationException) {
           Log.w("RNBackgroundDownloader", "pauseTask: " + e.message)
           // Note: We don't rethrow the exception to avoid crashing the JS thread.
           // The limitation is already documented and expected.
@@ -500,7 +519,7 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
   @Suppress("unused")
   fun resumeTask(configId: String?) {
     synchronized(sharedLock) {
-      val downloadId = configIdToDownloadId.get(configId)
+      val downloadId: Long? = configIdToDownloadId[configId]
       if (downloadId != null) {
         try {
           downloader.resume(downloadId)
@@ -517,10 +536,9 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
   @Suppress("unused")
   fun stopTask(configId: String?) {
     synchronized(sharedLock) {
-      val downloadId = configIdToDownloadId.get(configId)
+      val downloadId: Long? = configIdToDownloadId[configId]
       if (downloadId != null) {
-        stopTaskProgress(configId)
-        removeTaskFromMap(downloadId)
+        Log.d(name, "will cancel download with id: $downloadId")
         downloader.cancel(downloadId)
       }
     }
@@ -554,68 +572,74 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   @Suppress("unused")
-  fun checkForExistingDownloads(promise: Promise) {
-    val foundTasks = Arguments.createArray()
+  fun setApproval(isApproved: Boolean) {
+    setIsApproved(isApproved)
 
-    synchronized(sharedLock) {
-      val query = DownloadManager.Query()
-      try {
-        downloader.downloadManager.query(query).use { cursor ->
-          if (cursor.moveToFirst()) {
-            do {
-              val downloadStatus: WritableMap = downloader.getDownloadStatus(cursor)
-              val downloadId = downloadStatus.getString("downloadId")!!.toLong()
+    val cm = reactApplicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-              if (downloadIdToConfig.containsKey(downloadId)) {
-                val config: RNBGDTaskConfig? = downloadIdToConfig.get(downloadId)
+    val activeNetwork = cm.activeNetwork
+    val capabilities = cm.getNetworkCapabilities(activeNetwork)
+    val isOnCellular = activeNetwork != null && capabilities != null && capabilities.hasTransport(
+      NetworkCapabilities.TRANSPORT_CELLULAR)
 
-                if (config != null) {
-                  val status = downloadStatus.getInt("status")
-                  // Handle completed downloads that weren't processed
-                  if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                    val localUri = downloadStatus.getString("localUri")
-                    if (localUri != null) {
-                      try {
-                        val future = setFileChangesBeforeCompletion(localUri, config.destination!!)
-                        future.get()
-                      } catch (e: Exception) {
-                        Log.e(getName(), "Error moving completed download file: " + e.message)
-                        // Continue with normal processing even if file move fails
-                      }
-                    }
-                  }
-
-                  val params = Arguments.createMap()
-
-                  params.putString("id", config.id)
-                  params.putString("metadata", config.metadata)
-                  val statusMapping = stateMap.get(status)
-                  val state = if (statusMapping != null) statusMapping else 0
-                  params.putInt("state", state)
-                  params.putInt("savedTaskState", state)
-
-                  val bytesDownloaded = downloadStatus.getDouble("bytesDownloaded")
-                  params.putDouble("bytesDownloaded", bytesDownloaded)
-                  val bytesTotal = downloadStatus.getDouble("bytesTotal")
-                  params.putDouble("bytesTotal", bytesTotal)
-                  val percent = if (bytesTotal > 0) bytesDownloaded / bytesTotal else 0.0
-
-                  foundTasks.pushMap(params)
-                  configIdToDownloadId.put(config.id, downloadId)
-                  configIdToPercent.put(config.id, percent)
-                }
-              } else {
-                downloader.cancel(downloadId)
-              }
-            } while (cursor.moveToNext())
+    if (!isApproved && isOnCellular) {
+      val fetch = Fetch.Impl.getDefaultInstance()
+      fetch.getDownloads { downloads ->
+        // Cancel all downloads in progress
+        downloads.forEach { download ->
+          if (download.status == Status.DOWNLOADING || download.status == Status.QUEUED) {
+            fetch.cancel(download.id)
+            fetch.delete(download.id)
           }
         }
-      } catch (e: Exception) {
-        Log.e(getName(), "checkForExistingDownloads: " + Log.getStackTraceString(e))
       }
     }
+  }
 
-    promise.resolve(foundTasks)
+  @ReactMethod
+  @Suppress("unused")
+  fun checkForExistingDownloads(promise: Promise) {
+    val foundTasks: WritableArray = Arguments.createArray()
+
+    val cm = reactApplicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    val activeNetwork = cm.activeNetwork
+    val capabilities = cm.getNetworkCapabilities(activeNetwork)
+    val isOnWifi = activeNetwork != null && capabilities != null && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+
+    synchronized(sharedLock) {
+      val fetch = Fetch.Impl.getDefaultInstance()
+      fetch.getDownloads { downloads ->
+        for (download in downloads) {
+          val downloadId = download.id.toLong()
+          if (downloadIdToConfig.containsKey(downloadId) && (getIsApproved() || isOnWifi)) {
+            val config = downloadIdToConfig[downloadId]
+
+            if (config != null) {
+              Log.d(name, "check, id: ${downloadId}, config: ${config.id}, status: ${download.status}")
+
+              val params: WritableMap = Arguments.createMap()
+
+              params.putString("id", config.id)
+              val status = stateMap[download.status.value] ?: 0
+              params.putInt("state", status)
+              val bytesDownloaded = download.downloaded
+              params.putLong("bytesDownloaded", bytesDownloaded)
+              val bytesTotal = download.total
+              params.putLong("bytesTotal", bytesTotal)
+              val percent = if (bytesTotal > 0) bytesDownloaded / bytesTotal else 0.0
+
+              foundTasks.pushMap(params)
+              configIdToDownloadId[config.id] = downloadId
+            }
+          } else {
+            downloader.cancel(downloadId)
+          }
+        }
+
+        promise.resolve(foundTasks)
+      }
+    }
   }
 
   @ReactMethod
@@ -626,115 +650,6 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
   @ReactMethod
   @Suppress("unused")
   fun removeListeners(count: Int?) {
-  }
-
-  private fun onBeginDownload(configId: String?, headers: WritableMap?, expectedBytes: Long) {
-    val params = Arguments.createMap()
-    params.putString("id", configId)
-    params.putMap("headers", headers)
-    params.putDouble("expectedBytes", expectedBytes.toDouble())
-    ee!!.emit("downloadBegin", params)
-  }
-
-  private fun onProgressDownload(configId: String?, bytesDownloaded: Long, bytesTotal: Long) {
-    val existPercent = configIdToPercent.get(configId)
-    val existLastBytes = configIdToLastBytes.get(configId)
-    val prevPercent = if (existPercent != null) existPercent else 0.0
-    val prevBytes = if (existLastBytes != null) existLastBytes else 0
-    val percent = if (bytesTotal > 0.0) (bytesDownloaded.toDouble() / bytesTotal) else 0.0
-
-    // Check if we should report progress based on percentage OR bytes threshold
-    val percentThresholdMet = percent - prevPercent > 0.01
-    val bytesThresholdMet = bytesDownloaded - prevBytes >= progressMinBytes
-
-    // Report progress if either threshold is met, or if total bytes unknown (for realtime streams)
-    if (percentThresholdMet || bytesThresholdMet || bytesTotal <= 0) {
-      val params = Arguments.createMap()
-      params.putString("id", configId)
-      params.putDouble("bytesDownloaded", bytesDownloaded.toDouble())
-      params.putDouble("bytesTotal", bytesTotal.toDouble())
-      progressReports.put(configId, params)
-      configIdToPercent.put(configId, percent)
-      configIdToLastBytes.put(configId, bytesDownloaded)
-    }
-
-    val now = Date()
-    val isReportTimeDifference = now.getTime() - lastProgressReportedAt.getTime() > progressInterval
-    val isReportNotEmpty = !progressReports.isEmpty()
-    if (isReportTimeDifference && isReportNotEmpty) {
-      // Extra steps to avoid map always consumed errors.
-      val reportsList: MutableList<WritableMap?> = ArrayList<WritableMap?>(progressReports.values)
-      val reportsArray = Arguments.createArray()
-      for (report in reportsList) {
-        if (report != null) {
-          reportsArray.pushMap(report.copy())
-        }
-      }
-      ee!!.emit("downloadProgress", reportsArray)
-      lastProgressReportedAt = now
-      progressReports.clear()
-    }
-  }
-
-  private fun onSuccessfulDownload(config: RNBGDTaskConfig, downloadStatus: WritableMap) {
-    val localUri = downloadStatus.getString("localUri")
-
-    // TODO: We need to move it to a more suitable location.
-    //       Maybe somewhere in downloadReceiver?
-    // Feedback if any error occurs after downloading the file.
-    try {
-      val future = setFileChangesBeforeCompletion(localUri!!, config.destination!!)
-      future.get()
-    } catch (e: Exception) {
-      val newDownloadStatus = Arguments.createMap()
-      newDownloadStatus.putString("downloadId", downloadStatus.getString("downloadId"))
-      newDownloadStatus.putInt("status", DownloadManager.STATUS_FAILED)
-      newDownloadStatus.putInt("reason", DownloadManager.ERROR_UNKNOWN)
-      newDownloadStatus.putString("reasonText", e.message)
-      onFailedDownload(config, newDownloadStatus)
-      return
-    }
-
-    val params = Arguments.createMap()
-    params.putString("id", config.id)
-    params.putString("location", config.destination)
-    params.putDouble("bytesDownloaded", downloadStatus.getDouble("bytesDownloaded"))
-    params.putDouble("bytesTotal", downloadStatus.getDouble("bytesTotal"))
-    ee!!.emit("downloadComplete", params)
-  }
-
-  private fun onFailedDownload(config: RNBGDTaskConfig, downloadStatus: WritableMap) {
-    Log.e(
-      getName(), "onFailedDownload: " +
-        downloadStatus.getInt("status") + ":" +
-        downloadStatus.getInt("reason") + ":" +
-        downloadStatus.getString("reasonText")
-    )
-
-    val reason = downloadStatus.getInt("reason")
-    var reasonText = downloadStatus.getString("reasonText")
-
-    // Enhanced handling for ERROR_CANNOT_RESUME (1008)
-    if (reason == DownloadManager.ERROR_CANNOT_RESUME) {
-      Log.w(
-        getName(), "ERROR_CANNOT_RESUME detected for download: " + config.id +
-          ". This is a known Android DownloadManager issue with larger files. " +
-          "Consider restarting the download or using smaller file segments."
-      )
-
-      // Clean up the failed download entry
-      removeTaskFromMap(downloadStatus.getString("downloadId")!!.toLong())
-
-      // Provide more helpful error message
-      reasonText =
-        "ERROR_CANNOT_RESUME - Unable to resume download. This may occur with large files due to Android DownloadManager limitations. Try restarting the download."
-    }
-
-    val params = Arguments.createMap()
-    params.putString("id", config.id)
-    params.putInt("errorCode", reason)
-    params.putString("error", reasonText)
-    ee!!.emit("downloadFailed", params)
   }
 
   private fun saveDownloadIdToConfigMap() {
@@ -762,7 +677,7 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
 
   private fun loadDownloadIdToConfigMap() {
     synchronized(sharedLock) {
-      downloadIdToConfig = HashMap<Long?, RNBGDTaskConfig?>()
+      downloadIdToConfig = HashMap()
       try {
         var str: String? = null
 
@@ -782,13 +697,13 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
           val gson: Gson = Gson()
           val mapType: TypeToken<MutableMap<Long?, RNBGDTaskConfig?>?> =
             object : TypeToken<MutableMap<Long?, RNBGDTaskConfig?>?>() {}
-          downloadIdToConfig = gson.fromJson(str, mapType)!!
+          downloadIdToConfig = gson.fromJson(str, mapType)!! as MutableMap<Long, RNBGDTaskConfig?>
         } else {
           Log.d(getName(), "No existing download config found, starting with empty map")
         }
       } catch (e: Exception) {
         Log.e(getName(), "Failed to load download config: " + e.message)
-        downloadIdToConfig = HashMap<Long?, RNBGDTaskConfig?>()
+        downloadIdToConfig = HashMap()
       }
     }
   }
@@ -847,16 +762,6 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
     }
   }
 
-  private fun stopTaskProgress(configId: String?) {
-    val onProgressFuture: Future<OnProgressState?>? = configIdToProgressFuture.get(configId)
-    if (onProgressFuture != null) {
-      onProgressFuture.cancel(true)
-      configIdToPercent.remove(configId)
-      configIdToLastBytes.remove(configId)
-      configIdToProgressFuture.remove(configId)
-    }
-  }
-
   private fun setFileChangesBeforeCompletion(
     targetSrc: String,
     destinationSrc: String
@@ -899,6 +804,16 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
     }
 
     return false
+  }
+
+  fun getIsApproved(): Boolean {
+    val prefs: SharedPreferences = reactApplicationContext.getSharedPreferences("RNBDPrefs", Context.MODE_PRIVATE)
+    return prefs.getBoolean("isApproved", false)
+  }
+
+  private fun setIsApproved(isApproved: Boolean) {
+    val prefs: SharedPreferences = reactApplicationContext.getSharedPreferences("RNBDPrefs", Context.MODE_PRIVATE)
+    prefs.edit { putBoolean("isApproved", isApproved) }
   }
 
   companion object {
