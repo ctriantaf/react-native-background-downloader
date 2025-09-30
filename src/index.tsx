@@ -296,11 +296,13 @@ export const storageInfo = {
 
 export default {
   download,
+  getExistingDownloads,
   checkForExistingDownloads,
   ensureDownloadsAreRunning,
   completeHandler,
 
   setConfig,
+  setApproval,
 
   directories,
   storageInfo,
