@@ -4,6 +4,8 @@ import type { DownloadTask } from './index.d';
 export interface Spec extends TurboModule {
   checkForExistingDownloads: () => Promise<DownloadTask[]>;
   completeHandler: (id: string) => void;
+  getExistingDownloads: () => Promise<DownloadTask[]>;
+  setApproval: (approval: boolean) => void;
   download: (options: {
     id: string;
     url: string;

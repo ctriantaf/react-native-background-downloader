@@ -160,6 +160,36 @@ export async function checkForExistingDownloads() {
   }
 }
 
+export async function getExistingDownloads() {
+  return RNBackgroundDownloader.getExistingDownloads().then((foundTasks) => {
+    log('[RNBackgroundDownloader] getExistingDownloads-2', foundTasks);
+    return foundTasks
+      .map((taskInfo) => {
+        // SECOND ARGUMENT RE-ASSIGNS EVENT HANDLERS
+        const task = new DownloadTask(taskInfo, tasksMap.get(taskInfo.id));
+        log('[RNBackgroundDownloader] getExistingDownloads-3', taskInfo);
+
+        if (taskInfo.savedTaskState === Constants.TaskRunning) {
+          task.state = 'DOWNLOADING';
+        } else if (taskInfo.savedTaskState === Constants.TaskSuspended) {
+          task.state = 'PAUSED';
+        } else if (taskInfo.savedTaskState === Constants.TaskCanceling) {
+          task.stop();
+          return null;
+        } else if (taskInfo.savedTaskState === Constants.TaskCompleted) {
+          if (taskInfo.bytesDownloaded === taskInfo.bytesTotal)
+            task.state = 'DONE';
+          else
+            // IOS completed the download but it was not done.
+            return null;
+        }
+        tasksMap.set(taskInfo.id, task);
+        return task;
+      })
+      .filter((task) => !!task);
+  });
+}
+
 export async function ensureDownloadsAreRunning() {
   log('[RNBackgroundDownloader] ensureDownloadsAreRunning');
   const tasks = await checkForExistingDownloads();
@@ -195,6 +225,10 @@ export function completeHandler(jobId: string) {
   } catch (error) {
     console.error('[RNBackgroundDownloader] Error in completeHandler:', error);
   }
+}
+
+export function setApproval(isApproved: boolean) {
+  return RNBackgroundDownloader.setApproval(isApproved);
 }
 
 export function download(options: DownloadOptions) {

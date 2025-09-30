@@ -119,6 +119,7 @@ export interface DownloadTask {
 }
 
 export type CheckForExistingDownloads = () => Promise<DownloadTask[]>;
+export type GetExistingDownloads = () => Promise<DownloadTask[]>;
 export type EnsureDownloadsAreRunning = () => Promise<void>;
 
 export interface DownloadOptions {
@@ -136,6 +137,7 @@ export interface DownloadOptions {
 
 export type Download = (options: DownloadOptions) => DownloadTask;
 export type CompleteHandler = (id: string) => void;
+export type SetApproval = (isApproved: boolean) => void;
 
 export interface Directories {
   documents: string;
@@ -149,9 +151,11 @@ export interface StorageInfo {
 export interface RNBackgroundDownloader {
   setConfig: SetConfig;
   checkForExistingDownloads: CheckForExistingDownloads;
+  getExistingDownloads: GetExistingDownloads;
   ensureDownloadsAreRunning: EnsureDownloadsAreRunning;
   download: Download;
   completeHandler: CompleteHandler;
+  setApproval: SetApproval;
   directories: Directories;
   storageInfo: StorageInfo;
 }
