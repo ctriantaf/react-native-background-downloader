@@ -10,6 +10,7 @@ import {
   type ErrorListenerObject,
   type SetConfigParams,
 } from './index.d';
+import { Platform } from 'react-native';
 
 const MIN_PROGRESS_INTERVAL = 250;
 const tasksMap = new Map();
@@ -65,6 +66,18 @@ RNBackgroundDownloaderEmitter.addListener('downloadFailed', (event) => {
 
   tasksMap.delete(id);
 });
+
+if (Platform.OS === 'android') {
+  RNBackgroundDownloaderEmitter.addListener('downloadCancelled', (event) => {
+    const { id, ...rest } = event as ErrorListenerObject;
+    const task = tasksMap.get(id);
+    log('[RNBackgroundDownloader] downloadCancelled', id, task);
+
+    task?.onCancel(rest);
+
+    tasksMap.delete(id);
+  });
+}
 
 export function setConfig({
   headers,

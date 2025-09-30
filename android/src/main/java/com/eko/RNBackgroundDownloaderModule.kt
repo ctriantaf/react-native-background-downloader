@@ -16,6 +16,14 @@ class RNBackgroundDownloaderModule(val reactContext: ReactApplicationContext) :
     return NAME
   }
 
+  override fun setApproval(approval: Boolean) {
+    mModuleImpl.setApproval(approval)
+  }
+
+  override fun getExistingDownloads(promise: Promise) {
+    mModuleImpl.getExistingDownloads(promise)
+  }
+
   override fun checkForExistingDownloads(promise: Promise) {
     mModuleImpl.checkForExistingDownloads(promise)
   }

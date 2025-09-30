@@ -434,6 +434,58 @@ RCT_EXPORT_METHOD(checkForExistingDownloads: (RCTPromiseResolveBlock)resolve rej
     }];
 }
 
+RCT_EXPORT_METHOD(getExistingDownloads: (RCTPromiseResolveBlock)resolve reject:(RCTPromiseRejectBlock)reject) {
+    DLog(@"[RNBackgroundDownloader] - [getExistingDownloads]");
+    [self lazyRegisterSession];
+    [urlSession getTasksWithCompletionHandler:^(NSArray<NSURLSessionDataTask *> * _Nonnull dataTasks, NSArray<NSURLSessionUploadTask *> * _Nonnull uploadTasks, NSArray<NSURLSessionDownloadTask *> * _Nonnull downloadTasks) {
+        NSMutableArray *foundTasks = [[NSMutableArray alloc] init];
+        @synchronized (self->sharedLock) {
+            // Wait for the Thread to be ready.
+            // Prevents the first task from failing.
+            [NSThread sleepForTimeInterval:0.1f];
+
+            for (NSURLSessionDownloadTask *foundTask in downloadTasks) {
+                NSURLSessionDownloadTask __strong *task = foundTask;
+
+                // The task.taskIdentifier may change after the Application is closed and opened.
+                // We cannot rely on this value to launch tasks.
+                // The download function adds an configId value to the headers.
+                // We query taskToConfigMap with this value.
+                NSDictionary *headers = task.currentRequest.allHTTPHeaderFields;
+                NSString *configId = headers[@"configId"];
+
+                NSNumber *taskIdentifier = @-1;
+                RNBGDTaskConfig *taskConfig = nil;
+                for (NSNumber *key in self->taskToConfigMap) {
+                    RNBGDTaskConfig *config = self->taskToConfigMap[key];
+                    if ([config.id isEqualToString:configId]) {
+                        taskIdentifier = key;
+                        taskConfig = config;
+                        break;
+                    }
+                }
+
+                if (taskConfig && [taskIdentifier intValue] != -1) {
+                    [foundTasks addObject:@{
+                        @"id": taskConfig.id,
+                        @"metadata": taskConfig.metadata,
+                        @"state": [NSNumber numberWithInt:(int)task.state],
+                        @"bytesDownloaded": [NSNumber numberWithLongLong:task.countOfBytesReceived],
+                        @"bytesTotal": [NSNumber numberWithLongLong:task.countOfBytesExpectedToReceive]
+                    }];
+                    taskConfig.reportedBegin = YES;
+                    self->taskToConfigMap[@(task.taskIdentifier)] = taskConfig;
+                    self->idToTaskMap[taskConfig.id] = task;
+                } else {
+                    [task cancel];
+                }
+            }
+
+            resolve(foundTasks);
+        }
+    }];
+}
+
 #pragma mark - NSURLSessionDownloadDelegate methods
 - (void)URLSession:(nonnull NSURLSession *)session downloadTask:(nonnull NSURLSessionDownloadTask *)downloadTask didFinishDownloadingToURL:(nonnull NSURL *)location {
     DLog(@"[RNBackgroundDownloader] - [didFinishDownloadingToURL]");

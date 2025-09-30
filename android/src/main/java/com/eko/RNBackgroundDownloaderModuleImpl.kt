@@ -598,6 +598,13 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
 
   @ReactMethod
   @Suppress("unused")
+  fun getExistingDownloads(promise: Promise) {
+    val foundTasks: WritableArray = Arguments.createArray()
+    promise.resolve(foundTasks)
+  }
+
+  @ReactMethod
+  @Suppress("unused")
   fun checkForExistingDownloads(promise: Promise) {
     val foundTasks: WritableArray = Arguments.createArray()
 
