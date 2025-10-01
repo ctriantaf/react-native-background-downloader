@@ -10,6 +10,7 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.content.edit
 import com.eko.utils.FileUtils
+import com.eko.utils.convertFetchStatus
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
@@ -628,9 +629,7 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
               val params: WritableMap = Arguments.createMap()
 
               params.putString("id", config.id)
-              val status = stateMap[download.status.value] ?: 0
-              params.putInt("state", status)
-              params.putInt("savedTaskState", status)
+              params.putInt("state", convertFetchStatus(download.status))
               val bytesDownloaded = download.downloaded
               params.putLong("bytesDownloaded", bytesDownloaded)
               val bytesTotal = download.total
@@ -827,16 +826,6 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
   companion object {
     const val NAME: String = "RNBackgroundDownloader"
 
-    private const val TASK_RUNNING = 0
-    private const val TASK_SUSPENDED = 1
-    private const val TASK_CANCELING = 2
-    private const val TASK_COMPLETED = 3
-
-    private const val ERR_STORAGE_FULL = 0
-    private const val ERR_NO_INTERNET = 1
-    private const val ERR_NO_WRITE_PERMISSION = 2
-    private const val ERR_FILE_NOT_FOUND = 3
-    private const val ERR_OTHERS = 100
     private val stateMap: MutableMap<Int?, Int?> = object : HashMap<Int?, Int?>() {
       init {
         put(DownloadManager.STATUS_FAILED, TASK_CANCELING)
