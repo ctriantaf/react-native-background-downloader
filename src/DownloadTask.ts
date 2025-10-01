@@ -8,6 +8,8 @@ import {
   type ProgressHandler,
   type ProgressHandlerObject,
   type TaskInfo,
+  type CancelHandler,
+  type CancelHandlerObject,
 } from './index.d';
 
 import RNBackgroundDownloader from './NativeRNBackgroundDownloader';
@@ -24,6 +26,7 @@ function validateHandler(handler: any) {
 export default class DownloadTask {
   id = '';
   state = 'PENDING';
+  savedStatus = 0;
   metadata = {};
 
   bytesDownloaded = 0;
@@ -33,6 +36,7 @@ export default class DownloadTask {
   progressHandler;
   doneHandler;
   errorHandler;
+  cancelHandler;
 
   constructor(taskInfo: TaskInfo, originalTask?: TaskInfo) {
     this.id = taskInfo.id;
@@ -47,6 +51,7 @@ export default class DownloadTask {
       this.progressHandler = originalTask.progressHandler;
       this.doneHandler = originalTask.doneHandler;
       this.errorHandler = originalTask.errorHandler;
+      this.cancelHandler = originalTask.cancelHandler;
     }
   }
 
@@ -74,6 +79,12 @@ export default class DownloadTask {
     return this;
   }
 
+  cancel(handler: CancelHandler) {
+    validateHandler(handler);
+    this.cancelHandler = handler;
+    return this;
+  }
+
   onBegin(params: BeginHandlerObject) {
     this.state = 'DOWNLOADING';
     this.beginHandler?.(params);
@@ -95,6 +106,11 @@ export default class DownloadTask {
   onError(params: ErrorHandlerObject) {
     this.state = 'FAILED';
     this.errorHandler?.(params);
+  }
+
+  onCancel(params: CancelHandlerObject) {
+    this.state = 'STOPPED';
+    this.cancelHandler?.(params);
   }
 
   pause() {

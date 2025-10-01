@@ -629,7 +629,7 @@ class RNBackgroundDownloaderModuleImpl(reactContext: ReactApplicationContext) :
               val params: WritableMap = Arguments.createMap()
 
               params.putString("id", config.id)
-              params.putInt("state", convertFetchStatus(download.status))
+              params.putInt("savedStatus", convertFetchStatus(download.status))
               val bytesDownloaded = download.downloaded
               params.putLong("bytesDownloaded", bytesDownloaded)
               val bytesTotal = download.total

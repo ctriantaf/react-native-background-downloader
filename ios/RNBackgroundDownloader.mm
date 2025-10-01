@@ -415,8 +415,7 @@ RCT_EXPORT_METHOD(checkForExistingDownloads: (RCTPromiseResolveBlock)resolve rej
                     [foundTasks addObject:@{
                         @"id": taskConfig.id,
                         @"metadata": taskConfig.metadata,
-                        @"savedTaskState": [NSNumber numberWithInt:(int)task.state],
-                        @"state": [NSNumber numberWithInt:(int)task.state],
+                        @"savedStatus": [NSNumber numberWithInt:(int)task.state],
                         @"bytesDownloaded": [NSNumber numberWithLongLong:task.countOfBytesReceived],
                         @"bytesTotal": [NSNumber numberWithLongLong:task.countOfBytesExpectedToReceive]
                     }];

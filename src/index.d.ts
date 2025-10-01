@@ -63,6 +63,12 @@ export interface ErrorListenerObject {
 }
 export type ErrorHandler = ({ error, errorCode }: ErrorHandlerObject) => void;
 
+export interface CancelHandlerObject {
+  id: string;
+}
+
+export type CancelHandler = ({ params }: CancelHandlerObject) => void;
+
 export interface TaskInfoObject {
   id: string;
   metadata: object | string;
@@ -74,6 +80,7 @@ export interface TaskInfoObject {
   progressHandler?: ProgressHandler;
   doneHandler?: DoneHandler;
   errorHandler?: ErrorHandler;
+  cancelHandler?: CancelHandler;
 }
 export type TaskInfo = TaskInfoObject;
 
@@ -97,7 +104,7 @@ export interface DownloadTask {
 
   id: string;
   state: DownloadTaskState;
-  savedTaskState: (typeof SavedTaskState)[keyof typeof SavedTaskState];
+  savedStatus: (typeof SavedTaskState)[keyof typeof SavedTaskState];
 
   metadata: Record<string, any>;
   bytesDownloaded: number;
@@ -107,11 +114,13 @@ export interface DownloadTask {
   progress: (handler: ProgressHandler) => DownloadTask;
   done: (handler: DoneHandler) => DownloadTask;
   error: (handler: ErrorHandler) => DownloadTask;
+  cancel: (handler: CancelHandler) => DownloadTask;
 
   _beginHandler: BeginHandler;
   _progressHandler: ProgressHandler;
   _doneHandler: DoneHandler;
   _errorHandler: ErrorHandler;
+  _cancelHandler: CancelHandler;
 
   pause: () => void;
   resume: () => void;

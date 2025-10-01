@@ -146,14 +146,14 @@ export async function checkForExistingDownloads() {
         const task = new DownloadTask(taskInfo, tasksMap.get(taskInfo.id));
         log('[RNBackgroundDownloader] checkForExistingDownloads-3', taskInfo);
 
-        if (taskInfo.savedTaskState === Constants.TaskRunning) {
+        if (taskInfo.savedStatus === Constants.TaskRunning) {
           task.state = 'DOWNLOADING';
-        } else if (taskInfo.savedTaskState === Constants.TaskSuspended) {
+        } else if (taskInfo.savedStatus === Constants.TaskSuspended) {
           task.state = 'PAUSED';
-        } else if (taskInfo.savedTaskState === Constants.TaskCanceling) {
+        } else if (taskInfo.savedStatus === Constants.TaskCanceling) {
           task.stop();
           return null;
-        } else if (taskInfo.savedTaskState === Constants.TaskCompleted) {
+        } else if (taskInfo.savedStatus === Constants.TaskCompleted) {
           if (taskInfo.bytesDownloaded === taskInfo.bytesTotal)
             task.state = 'DONE';
           else
@@ -182,14 +182,14 @@ export async function getExistingDownloads() {
         const task = new DownloadTask(taskInfo, tasksMap.get(taskInfo.id));
         log('[RNBackgroundDownloader] getExistingDownloads-3', taskInfo);
 
-        if (taskInfo.savedTaskState === Constants.TaskRunning) {
+        if (taskInfo.savedStatus === Constants.TaskRunning) {
           task.state = 'DOWNLOADING';
-        } else if (taskInfo.savedTaskState === Constants.TaskSuspended) {
+        } else if (taskInfo.savedStatus === Constants.TaskSuspended) {
           task.state = 'PAUSED';
-        } else if (taskInfo.savedTaskState === Constants.TaskCanceling) {
+        } else if (taskInfo.savedStatus === Constants.TaskCanceling) {
           task.stop();
           return null;
-        } else if (taskInfo.savedTaskState === Constants.TaskCompleted) {
+        } else if (taskInfo.savedStatus === Constants.TaskCompleted) {
           if (taskInfo.bytesDownloaded === taskInfo.bytesTotal)
             task.state = 'DONE';
           else
