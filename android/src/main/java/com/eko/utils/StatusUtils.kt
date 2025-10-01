@@ -7,7 +7,7 @@ import com.eko.TASK_SUSPENDED
 import com.tonyodev.fetch2.Status
 
 fun convertFetchStatus(status: Status): Int {
-    when (status) {
+    return when (status) {
         Status.NONE -> TASK_SUSPENDED
         Status.QUEUED -> TASK_RUNNING
         Status.DOWNLOADING -> TASK_RUNNING
